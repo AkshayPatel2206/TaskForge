@@ -1,7 +1,27 @@
+
+# Dependencies
 node_modules/
-dist/
+
+# Environment secrets
 .env
 .env.*
+
+# Allow an example environment file
 !.env.example
 
-/src/generated/prisma
+# Compiled output
+dist/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Operating system and editor files
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Uploaded files
+uploads/
+
+# Prisma local/dev artifacts
