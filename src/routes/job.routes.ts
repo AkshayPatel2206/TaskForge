@@ -1,0 +1,153 @@
+
+import { Router } from "express";
+import prisma from "../lib/prisma.js";
+import { isAuthenticated } from "../middleware/auth.middleware.js";
+import { createJobSchema } from "../schemas/job.schema.js";
+
+const router = Router();
+
+router.use(isAuthenticated);
+
+router.get("/", async (req, res) => {
+  try {
+
+    const page = Number(req.query.page ?? 1);
+    const limit = Number(req.query.limit ?? 10);
+    const status = req.query.status;
+
+    if (
+      !Number.isInteger(page) ||
+      !Number.isInteger(limit) ||
+      page < 1 ||
+      limit < 1 ||
+      limit > 100
+    ) {
+      res.status(400).json({
+        success: false,
+        message: "page must be >= 1 and limit must be between 1 and 100",
+      });
+      return;
+    }
+
+     const validStatuses = [
+      "PENDING",
+      "RUNNING",
+      "COMPLETED",
+      "FAILED",
+    ];
+
+    if (
+      status !== undefined &&
+      (typeof status !== "string" || !validStatuses.includes(status))
+    ) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid job status",
+      });
+      return;
+    }
+
+    const where = {
+      userId:req.user!.id,
+      ...(typeof status === "string" ? {status:status as "PENDING" | "RUNNING" | "COMPLETED" | "FAILED"  } : {})
+    }
+
+    const [jobs,totalJobs] = await prisma.$transaction([
+      prisma.job.findMany({
+          where,
+          orderBy:{
+            createdAt:"desc",
+          },
+          skip : (page - 1)*limit,
+          take: limit,
+      }),
+       prisma.job.count({ where }),
+    ])
+    res.status(200).json({
+       success: true,
+      data: jobs,
+      pagination: {
+        page,
+        limit,
+        totalJobs,
+        totalPages: Math.ceil(totalJobs / limit),
+      },
+    });
+  } catch (error) {
+    console.error("Failed to fetch jobs:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch jobs",
+    });
+  }
+});
+
+router.get("/:id", async (req, res) => {
+  try {
+    const job = await prisma.job.findFirst({
+      where: {
+        id: req.params.id,
+        userId: req.user!.id,
+      },
+    });
+
+    if (!job) {
+      res.status(404).json({
+        success: false,
+        message: "Job not found",
+      });
+      return;
+    }
+
+    res.status(200).json({
+      success: true,
+      data: job,
+    });
+  } catch (error) {
+    console.error("Failed to fetch job:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch job",
+    });
+  }
+});
+
+router.post("/", async (req, res) => {
+  const validation = createJobSchema.safeParse(req.body);
+
+  if (!validation.success) {
+    res.status(400).json({
+      success: false,
+      errors: validation.error.issues,
+    });
+    return;
+  }
+
+  try {
+    const { title, payload } = validation.data;
+
+    const job = await prisma.job.create({
+      data: {
+        userId: req.user!.id,
+        title,
+        ...(payload !== undefined ? { payload: payload as object } : {}),
+      },
+    });
+
+    res.status(201).json({
+      success: true,
+      data: job,
+    });
+  } catch (error) {
+    console.error("Failed to create job:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to create job",
+    });
+  }
+});
+
+export default router;
