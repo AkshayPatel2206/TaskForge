@@ -1,8 +1,9 @@
-
+import { jobQueue } from "../lib/queue.js";
 import { Router } from "express";
 import prisma from "../lib/prisma.js";
 import { isAuthenticated } from "../middleware/auth.middleware.js";
 import { createJobSchema } from "../schemas/job.schema.js";
+import { tryCatch } from "bullmq";
 
 const router = Router();
 
@@ -29,11 +30,12 @@ router.get("/", async (req, res) => {
       return;
     }
 
-     const validStatuses = [
+    const validStatuses = [
       "PENDING",
       "RUNNING",
       "COMPLETED",
       "FAILED",
+      "CANCELLED",
     ];
 
     if (
@@ -48,23 +50,23 @@ router.get("/", async (req, res) => {
     }
 
     const where = {
-      userId:req.user!.id,
-      ...(typeof status === "string" ? {status:status as "PENDING" | "RUNNING" | "COMPLETED" | "FAILED"  } : {})
+      userId: req.user!.id,
+      ...(typeof status === "string" ? { status: status as "PENDING" | "RUNNING" | "COMPLETED" | "FAILED" } : {})
     }
 
-    const [jobs,totalJobs] = await prisma.$transaction([
+    const [jobs, totalJobs] = await prisma.$transaction([
       prisma.job.findMany({
-          where,
-          orderBy:{
-            createdAt:"desc",
-          },
-          skip : (page - 1)*limit,
-          take: limit,
+        where,
+        orderBy: {
+          createdAt: "desc",
+        },
+        skip: (page - 1) * limit,
+        take: limit,
       }),
-       prisma.job.count({ where }),
+      prisma.job.count({ where }),
     ])
     res.status(200).json({
-       success: true,
+      success: true,
       data: jobs,
       pagination: {
         page,
@@ -136,10 +138,38 @@ router.post("/", async (req, res) => {
       },
     });
 
-    res.status(201).json({
+    try {
+      await jobQueue.add(
+        "process-job",
+        { jobId: job.id },
+        { jobId: job.id },
+      )
+    } catch (error) {
+      console.error("Failed to enqueue job:", error);
+      await prisma.job.deleteMany({
+        where: {
+          id: job.id,
+          userId: req.user!.id,
+          status: "PENDING",
+        }
+      })
+
+      res.status(503).json({
+        success: false,
+        message: "Unable to queue job. Please try again.",
+      });
+      return;
+    }
+
+     res.status(201).json({
       success: true,
       data: job,
+      message: "Job created and queued successfully",
     });
+
+    
+
+    
   } catch (error) {
     console.error("Failed to create job:", error);
 
@@ -149,5 +179,121 @@ router.post("/", async (req, res) => {
     });
   }
 });
+
+router.delete("/:id", async (req, res) => {
+  try {
+    const job = await prisma.job.findFirst({
+      where: {
+        id: req.params.id,
+        userId: req.user!.id,
+      }
+    });
+
+    if (!job) {
+      res.status(404).json({
+        success: false,
+        message: "Job not found",
+      });
+      return;
+    }
+
+    if (job.status !== "PENDING") {
+      res.status(409).json({
+        success: false,
+        message: `Cannot delete a job with status ${job.status}`,
+      });
+      return;
+    }
+
+    const deleted = await prisma.job.deleteMany({
+      where: {
+        id: job.id,
+        userId: req.user!.id,
+        status: "PENDING",
+      },
+
+    })
+
+    if (deleted.count === 0) {
+      res.status(409).json({
+        success: false,
+        message: "Job status changed; try again",
+      })
+      return;
+    }
+    res.status(200).json({
+      success: true,
+      message: "Pending job deleted successfully",
+    })
+
+
+  } catch (error) {
+    console.error("Failed to delete job:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to delete job",
+    });
+  }
+})
+
+
+router.post("/:id/cancel", async (req, res) => {
+  try {
+    const job = await prisma.job.findFirst({
+      where: {
+        id: req.params.id,
+        userId: req.user!.id,
+      },
+    });
+
+    if (!job) {
+      res.status(404).json({
+        success: false,
+        message: "Job not found",
+      });
+      return;
+    }
+
+    if (job.status !== "PENDING") {
+      res.status(409).json({
+        success: false,
+        message: `Cannot cancel a job with status ${job.status}`,
+      });
+      return;
+    }
+
+    const updated = await prisma.job.updateMany({
+      where: {
+        id: job.id,
+        userId: req.user!.id,
+        status: "PENDING",
+      },
+      data: {
+        status: "CANCELLED",
+      },
+    });
+
+    if (updated.count === 0) {
+      res.status(409).json({
+        success: false,
+        message: "Job status changed; try again",
+      });
+      return;
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Job cancelled successfully",
+    });
+  } catch (error) {
+    console.error("Failed to cancel job:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to cancel job",
+    });
+  }
+});
+
 
 export default router;
