@@ -4,7 +4,6 @@
 // Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
 // Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
 
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -29,26 +28,28 @@ enum AttemptStatus {
 }
 
 model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  name      String?
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String?
   passwordHash String?
-  jobs      Job[]
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  jobs         Job[]
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 }
 
 model Job {
-  id          String    @id @default(cuid())
-  userId      String
-  title       String
-  payload     Json?
-  result      Json?
-  status      JobStatus @default(PENDING)
-  attempts    JobAttempt[]
-  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  id              String       @id @default(cuid())
+  userId          String
+  title           String
+  payload         Json?
+  result          Json?
+  status          JobStatus    @default(PENDING)
+  attempts        JobAttempt[]
+  user            User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deadLetteredAt  DateTime?
+  deadLetterError String?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
 
   @@index([userId, createdAt])
   @@index([status, createdAt])

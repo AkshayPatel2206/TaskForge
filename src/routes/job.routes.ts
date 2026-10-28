@@ -85,6 +85,38 @@ router.get("/", async (req, res) => {
   }
 });
 
+router.get("/failed", async (req, res) => {
+    try {
+        const jobs = await prisma.job.findMany({
+            where: {
+                userId: req.user!.id,
+                status: "FAILED",
+            },
+            include: {
+                attempts: {
+                    orderBy: {
+                        attemptNumber: "asc",
+                    },
+                },
+            },
+            orderBy: {
+                updatedAt: "desc",
+            },
+        });
+
+        res.status(200).json({
+            success: true,
+            data: jobs,
+        });
+    } catch (error) {
+        console.error("Failed to fetch failed jobs:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Failed to fetch failed jobs",
+        });
+    }
+});
 router.get("/:id", async (req, res) => {
   try {
     const job = await prisma.job.findFirst({
@@ -192,6 +224,7 @@ router.post("/", async (req, res) => {
     });
   }
 });
+
 
 router.delete("/:id", async (req, res) => {
   try {
@@ -407,6 +440,7 @@ router.post("/:id/retry", async (req, res) => {
     });
   }
 });
+
 
 
 

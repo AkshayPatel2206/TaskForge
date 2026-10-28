@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { Worker } from "bullmq";
 import prisma from "../lib/prisma.js";
-
+import { deadLetterQueue } from "../lib/queue.js";
 const worker = new Worker("taskforge-jobs", async (bullJob) => {
     const { jobId } = bullJob.data as { jobId: string };
 
@@ -54,6 +54,7 @@ const worker = new Worker("taskforge-jobs", async (bullJob) => {
     try {
         await new Promise((resolve) => setTimeout(resolve, 3000));
         //throw new Error("Intentional retry test failure");
+        //throw new Error("Intentional DLQ test failure");
 
 
         await prisma.$transaction([
@@ -76,6 +77,8 @@ const worker = new Worker("taskforge-jobs", async (bullJob) => {
             }),
         ]);
         console.log(`Job ${jobId} completed successfully`);
+
+
     } catch (error) {
 
         const errorMessage =
@@ -100,12 +103,50 @@ const worker = new Worker("taskforge-jobs", async (bullJob) => {
                 where: { id: jobId },
                 data: {
                     status: isLastAttempt ? "FAILED" : "PENDING"
-
                 },
             })
         ]);
 
         console.log(`Job ${jobId} failed on attempt ${bullJob.attemptsMade + 1} / ${maxAttempts}`);
+
+        if (isLastAttempt) {
+            try {
+                await deadLetterQueue.add("dead-letter-job", {
+                    jobId,
+                    errorMessage,
+                    failedAt: new Date().toISOString(),
+                    attemptsMade: bullJob.attemptsMade + 1,
+                }, {
+                    jobId: `${jobId}-dead-letter`,
+                });
+
+                await prisma.job.update({
+                    where: { id: jobId },
+                    data: {
+                        deadLetteredAt: new Date(),
+                        deadLetterError: null,
+                    },
+                });
+                console.log(`Job ${jobId} moved to dead-letter queue`);
+            } catch (error) {
+                const dlqErrorMessage =
+                    error instanceof Error
+                        ? error.message
+                        : "Unknown DLQ delivery error";
+
+                await prisma.job.update({
+                    where: { id: jobId },
+                    data: {
+                        deadLetterError: dlqErrorMessage,
+                    },
+                });
+
+                console.error(
+                    `Failed to enqueue job ${jobId} in dead-letter queue:`,
+                    dlqErrorMessage,
+                );
+            }
+        }
 
 
         throw error;
