@@ -92,6 +92,13 @@ router.get("/:id", async (req, res) => {
         id: req.params.id,
         userId: req.user!.id,
       },
+      include:{
+        attempts:{
+          orderBy:{
+            attemptNumber:"asc"
+          }
+        }
+      }
     });
 
     if (!job) {
@@ -142,7 +149,13 @@ router.post("/", async (req, res) => {
       await jobQueue.add(
         "process-job",
         { jobId: job.id },
-        { jobId: job.id },
+        { jobId: job.id,
+          attempts:3,
+          backoff:{
+            type:"exponential",
+            delay:1000,
+          }
+         },
       )
     } catch (error) {
       console.error("Failed to enqueue job:", error);
@@ -294,6 +307,107 @@ router.post("/:id/cancel", async (req, res) => {
     });
   }
 });
+
+
+router.post("/:id/retry", async (req, res) => {
+  try {
+    const job = await prisma.job.findFirst({
+      where: {
+        id: req.params.id,
+        userId: req.user!.id,
+      },
+    });
+
+    if (!job) {
+      res.status(404).json({
+        success: false,
+        message: "Job not found",
+      });
+      return;
+    }
+
+    if (job.status !== "FAILED") {
+      res.status(409).json({
+        success: false,
+        message: `Cannot retry a job with status ${job.status}`,
+      });
+      return;
+    }
+
+    // Change FAILED to PENDING only if it is still FAILED.
+    const updated = await prisma.job.updateMany({
+      where: {
+        id: job.id,
+        userId: req.user!.id,
+        status: "FAILED",
+      },
+      data: {
+        status: "PENDING",
+        result: {},
+      },
+    });
+
+    if (updated.count === 0) {
+      res.status(409).json({
+        success: false,
+        message: "Job status changed; please try again",
+      });
+      return;
+    }
+
+    try {
+      await jobQueue.add(
+        "process-job",
+        { jobId: job.id },
+        {
+          // Use a new queue ID for each manual retry.
+          jobId: `${job.id}-manual-${Date.now()}`,
+          attempts: 3,
+          backoff: {
+            type: "exponential",
+            delay: 1000,
+          },
+        },
+      );
+    } catch (queueError) {
+      console.error("Failed to enqueue retry:", queueError);
+
+      await prisma.job.updateMany({
+        where: {
+          id: job.id,
+          userId: req.user!.id,
+          status: "PENDING",
+        },
+        data: {
+          status: "FAILED",
+        },
+      });
+
+      res.status(503).json({
+        success: false,
+        message: "Unable to queue retry. Please try again.",
+      });
+      return;
+    }
+
+    res.status(202).json({
+      success: true,
+      message: "Job retry queued successfully",
+      data: {
+        jobId: job.id,
+        status: "PENDING",
+      },
+    });
+  } catch (error) {
+    console.error("Failed to retry job:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to retry job",
+    });
+  }
+});
+
 
 
 export default router;

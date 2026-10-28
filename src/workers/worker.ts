@@ -1,75 +1,129 @@
 import "dotenv/config";
 import { Worker } from "bullmq";
-import  prisma  from "../lib/prisma.js";
+import prisma from "../lib/prisma.js";
 
-
-
-const worker = new Worker("taskforge-jobs",async(bullJob) => {
-    const {jobId} =  bullJob.data as {jobId:string};
+const worker = new Worker("taskforge-jobs", async (bullJob) => {
+    const { jobId } = bullJob.data as { jobId: string };
 
     console.log(`Processing job: ${jobId}`);
 
-     const job = await prisma.job.findUnique({
-      where: { id: jobId },
+    const job = await prisma.job.findUnique({
+        where: { id: jobId },
     });
 
-     if (!job) {
-      throw new Error(`Job ${jobId} not found in PostgreSQL`);
+    if (!job) {
+        throw new Error(`Job ${jobId} not found in PostgreSQL`);
     }
 
     if (job.status !== "PENDING") {
-      console.log(`Skipping job ${jobId} with status ${job.status}`);
-      return;
+        console.log(`Skipping job ${jobId} with status ${job.status}`);
+        return;
     }
 
     const updated = await prisma.job.updateMany({
-        where:{
-            id:jobId,
-            status:"PENDING",
+        where: {
+            id: jobId,
+            status: "PENDING",
         },
-        data:{
-            status:"RUNNING"
+        data: {
+            status: "RUNNING"
         }
     })
 
-     if (updated.count === 0) {
-      console.log(`Job ${jobId} was already claimed or changed`);
-      return;
+    if (updated.count === 0) {
+        console.log(`Job ${jobId} was already claimed or changed`);
+        return;
     }
+
+    const prevAttemps = await prisma.jobAttempt.count({
+        where: { jobId },
+    })
+
+    const attemptNumber = prevAttemps + 1;
+
+    const attemp = await prisma.jobAttempt.create({
+        data: {
+            jobId,
+            attemptNumber,
+            status: "RUNNING",
+            startedAt: new Date(),
+        }
+    })
+
 
     try {
-        await new Promise((resolve) => setTimeout(resolve,3000));
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+        //throw new Error("Intentional retry test failure");
 
-        await prisma.job.update({
-            where:{id:jobId},
-            data:{
-                status:"COMPLETED",
-                result:{message:"Job processed successfully"},
-            }
-            
-        })
+
+        await prisma.$transaction([
+            prisma.jobAttempt.update({
+                where: {
+                    id: attemp.id,
+                },
+                data: {
+                    status: "SUCCEEDED",
+                    finishedAt: new Date(),
+                },
+            }),
+
+            prisma.job.update({
+                where: { id: jobId },
+                data: {
+                    status: "COMPLETED",
+                    result: { message: "Job processed successfully" },
+                },
+            }),
+        ]);
         console.log(`Job ${jobId} completed successfully`);
     } catch (error) {
-        await prisma.job.update({
-        where: { id: jobId },
-        data: { status: "FAILED" },
-      });
-       throw error;
+
+        const errorMessage =
+            error instanceof Error ? error.message : "Unknown processing error";
+
+
+        const maxAttempts = bullJob.opts.attempts ?? 1;
+        const isLastAttempt = bullJob.attemptsMade + 1 >= maxAttempts;
+
+        await prisma.$transaction([
+            prisma.jobAttempt.update({
+                where: {
+                    id: attemp.id,
+                },
+                data: {
+                    status: "FAILED",
+                    errorMessage,
+                    finishedAt: new Date(),
+                }
+            }),
+            prisma.job.update({
+                where: { id: jobId },
+                data: {
+                    status: isLastAttempt ? "FAILED" : "PENDING"
+
+                },
+            })
+        ]);
+
+        console.log(`Job ${jobId} failed on attempt ${bullJob.attemptsMade + 1} / ${maxAttempts}`);
+
+
+        throw error;
     }
 },
-{
-    connection:{
-        host: process.env.REDIS_HOST || "localhost",
-      port: Number(process.env.REDIS_PORT || 6379),
-    }
-})
+    {
+        connection: {
+            host: process.env.REDIS_HOST || "localhost",
+            port: Number(process.env.REDIS_PORT || 6379),
+        }
+    })
 
-worker.on("completed",(job)=>{
+worker.on("completed", (job) => {
     console.log(`Queue job ${job.id} compleated`);
 });
 
 worker.on("failed", (job, error) => {
-  console.error(`Queue job ${job?.id} failed:`, error.message);
+    console.error(`Queue job ${job?.id} failed:`, error.message);
 });
 
 console.log("TaskForge worker is running");
