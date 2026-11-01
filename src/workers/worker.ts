@@ -153,11 +153,12 @@ const worker = new Worker("taskforge-jobs", async (bullJob) => {
     }
 },
     {
-        connection: {
-            host: process.env.REDIS_HOST || "localhost",
-            port: Number(process.env.REDIS_PORT || 6379),
-        }
-    })
+  connection: {
+    host: process.env.REDIS_HOST || "localhost",
+    port: Number(process.env.REDIS_PORT || 6379),
+  },
+  concurrency: 5,
+});
 
 worker.on("completed", (job) => {
     console.log(`Queue job ${job.id} compleated`);
@@ -168,3 +169,24 @@ worker.on("failed", (job, error) => {
 });
 
 console.log("TaskForge worker is running");
+
+
+async function gracefulShutdown(signal: string) {
+  console.log(`\n${signal} received. Shutting down worker...`);
+
+  try {
+    await worker.close();
+    console.log("Worker closed successfully.");
+
+    await prisma.$disconnect();
+    console.log("Prisma disconnected successfully.");
+
+    process.exit(0);
+  } catch (error) {
+    console.error("Error during graceful shutdown:", error);
+    process.exit(1);
+  }
+}
+
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));

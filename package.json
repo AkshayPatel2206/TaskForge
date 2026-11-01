@@ -10,7 +10,8 @@
     "build": "tsc",
     "start": "node dist/index.js",
      "worker": "node dist/workers/worker.js",
-     "recover:dlq": "tsx src/scripts/recover-dlq.ts"
+     "recover:dlq": "tsx src/scripts/recover-dlq.ts",
+     "recover:stuck": "tsx src/scripts/recover-stuck-jobs.ts"
   },
   "keywords": [],
   "author": "",
