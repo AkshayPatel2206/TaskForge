@@ -155,6 +155,7 @@ router.get("/:id", async (req, res) => {
   }
 });
 
+
 router.post("/", async (req, res) => {
   const validation = createJobSchema.safeParse(req.body);
 
@@ -169,52 +170,40 @@ router.post("/", async (req, res) => {
   try {
     const { title, payload } = validation.data;
 
-    const job = await prisma.job.create({
-      data: {
-        userId: req.user!.id,
-        title,
-        ...(payload !== undefined ? { payload: payload as object } : {}),
-      },
-    });
+    // Create Job and OutboxEvent in one transaction
+    const result = await prisma.$transaction(async (tx) => {
 
-    try {
-      await jobQueue.add(
-        "process-job",
-        { jobId: job.id },
-        { jobId: job.id,
-          attempts:3,
-          backoff:{
-            type:"exponential",
-            delay:1000,
-          }
-         },
-      )
-    } catch (error) {
-      console.error("Failed to enqueue job:", error);
-      await prisma.job.deleteMany({
-        where: {
-          id: job.id,
+      // 1. Create Job in PostgreSQL
+      const job = await tx.job.create({
+        data: {
           userId: req.user!.id,
-          status: "PENDING",
-        }
-      })
-
-      res.status(503).json({
-        success: false,
-        message: "Unable to queue job. Please try again.",
+          title,
+          ...(payload !== undefined
+            ? { payload: payload as object }
+            : {}),
+        },
       });
-      return;
-    }
 
-     res.status(201).json({
-      success: true,
-      data: job,
-      message: "Job created and queued successfully",
+      // 2. Create Outbox Event in PostgreSQL
+      const event = await tx.outboxEvent.create({
+        data: {
+          eventType: "JOB_CREATED",
+          payload: {
+            jobId: job.id,
+          },
+        },
+      });
+
+      return { job, event };
     });
 
-    
+    // Return successful response
+    res.status(201).json({
+      success: true,
+      data: result.job,
+      message: "Job created successfully. Awaiting queue publishing.",
+    });
 
-    
   } catch (error) {
     console.error("Failed to create job:", error);
 
@@ -224,6 +213,7 @@ router.post("/", async (req, res) => {
     });
   }
 });
+
 
 
 router.delete("/:id", async (req, res) => {

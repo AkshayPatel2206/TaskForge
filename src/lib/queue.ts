@@ -6,7 +6,7 @@ const connection ={
         port:Number(process.env.REDIS_PORT ),
 };
 export const jobQueue = new Queue("taskforge-jobs",{
-    connection
+    connection,
 })
 export const deadLetterQueue = new Queue("askforge-dead-letter",{
     connection,

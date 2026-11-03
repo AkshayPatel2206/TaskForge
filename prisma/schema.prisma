@@ -68,3 +68,16 @@ model JobAttempt {
   @@unique([jobId, attemptNumber])
   @@index([jobId, startedAt])
 }
+
+model OutboxEvent {
+  id          String    @id @default(cuid())
+  eventType   String
+  payload     Json
+  status      String    @default("PENDING")
+  createdAt   DateTime  @default(now())
+  publishedAt DateTime?
+  retryCount  Int       @default(0)
+  lastError   String?
+  claimedAt   DateTime? 
+  @@index([status, createdAt])
+}
