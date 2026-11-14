@@ -9,6 +9,97 @@ const router = Router();
 
 router.use(isAuthenticated);
 
+router.get("/metrics", async (req, res) => {
+  try {
+    const userId = req.user!.id;
+
+    const [
+      totalJobs,
+      pending,
+      running,
+      completed,
+      failed,
+      cancelled,
+
+      totalAttempts,
+      successfulAttempts,
+      failedAttempts,
+      runningAttempts,
+      retryAttempts,
+    ] = await prisma.$transaction([
+      // Job metrics
+      prisma.job.count({ where: { userId } }),
+      prisma.job.count({ where: { userId, status: "PENDING" } }),
+      prisma.job.count({ where: { userId, status: "RUNNING" } }),
+      prisma.job.count({ where: { userId, status: "COMPLETED" } }),
+      prisma.job.count({ where: { userId, status: "FAILED" } }),
+      prisma.job.count({ where: { userId, status: "CANCELLED" } }),
+
+      // Attempt metrics
+      prisma.jobAttempt.count({
+        where: { job: { userId } },
+      }),
+      prisma.jobAttempt.count({
+        where: { job: { userId }, status: "SUCCEEDED" },
+      }),
+      prisma.jobAttempt.count({
+        where: { job: { userId }, status: "FAILED" },
+      }),
+      prisma.jobAttempt.count({
+        where: { job: { userId }, status: "RUNNING" },
+      }),
+      prisma.jobAttempt.count({
+        where: { job: { userId }, attemptNumber: { gt: 1 } },
+      }),
+    ]);
+
+    // BullMQ queue metrics
+    const queueCounts = await jobQueue.getJobCounts(
+      "wait",
+      "active",
+      "completed",
+      "failed",
+      "delayed",
+      //"paused",
+    );
+
+    res.status(200).json({
+      success: true,
+      data: {
+        jobs: {
+          totalJobs,
+          pending,
+          running,
+          completed,
+          failed,
+          cancelled,
+        },
+        attempts: {
+          totalAttempts,
+          successfulAttempts,
+          failedAttempts,
+          runningAttempts,
+          retryAttempts,
+        },
+        queue: {
+          waiting: queueCounts.wait,
+          active: queueCounts.active,
+          completed: queueCounts.completed,
+          failed: queueCounts.failed,
+          delayed: queueCounts.delayed,
+         // paused: queueCounts.paused,
+        },
+      },
+    });
+  } catch (error) {
+    console.error("Failed to fetch job metrics:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch job metrics",
+    });
+  }
+});
 router.get("/", async (req, res) => {
   try {
 
@@ -86,36 +177,36 @@ router.get("/", async (req, res) => {
 });
 
 router.get("/failed", async (req, res) => {
-    try {
-        const jobs = await prisma.job.findMany({
-            where: {
-                userId: req.user!.id,
-                status: "FAILED",
-            },
-            include: {
-                attempts: {
-                    orderBy: {
-                        attemptNumber: "asc",
-                    },
-                },
-            },
-            orderBy: {
-                updatedAt: "desc",
-            },
-        });
+  try {
+    const jobs = await prisma.job.findMany({
+      where: {
+        userId: req.user!.id,
+        status: "FAILED",
+      },
+      include: {
+        attempts: {
+          orderBy: {
+            attemptNumber: "asc",
+          },
+        },
+      },
+      orderBy: {
+        updatedAt: "desc",
+      },
+    });
 
-        res.status(200).json({
-            success: true,
-            data: jobs,
-        });
-    } catch (error) {
-        console.error("Failed to fetch failed jobs:", error);
+    res.status(200).json({
+      success: true,
+      data: jobs,
+    });
+  } catch (error) {
+    console.error("Failed to fetch failed jobs:", error);
 
-        res.status(500).json({
-            success: false,
-            message: "Failed to fetch failed jobs",
-        });
-    }
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch failed jobs",
+    });
+  }
 });
 router.get("/:id", async (req, res) => {
   try {
@@ -124,10 +215,10 @@ router.get("/:id", async (req, res) => {
         id: req.params.id,
         userId: req.user!.id,
       },
-      include:{
-        attempts:{
-          orderBy:{
-            attemptNumber:"asc"
+      include: {
+        attempts: {
+          orderBy: {
+            attemptNumber: "asc"
           }
         }
       }
@@ -190,7 +281,7 @@ router.post("/", async (req, res) => {
           eventType: "JOB_CREATED",
           payload: {
             jobId: job.id,
-             correlationId: res.locals.requestId,
+            correlationId: res.locals.requestId,
           },
         },
       });
