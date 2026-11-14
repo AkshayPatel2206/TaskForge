@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import authRoutes from "./routes/auth.routes.js";
 import jobRoutes from "./routes/job.routes.js";
 import logger from "./lib/logger.js";
+import healthRoutes from "./routes/health.routes.js";
 dotenv.config();
 
 const app = express();
@@ -42,12 +43,7 @@ app.use((req, res, next) => {
 });
 app.use("/api/auth", authRoutes);
 app.use("/api/jobs", jobRoutes);
-app.get("/health", (_req, res) => {
-    res.json({
-        status: "ok",
-        service: "TaskForge Api"
-    })
-})
+app.use("/health", healthRoutes);
 
 
 app.listen(PORT, () => {
