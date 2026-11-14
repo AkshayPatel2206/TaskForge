@@ -4,6 +4,47 @@ import logger from "../lib/logger.js";
 import { Worker } from "bullmq";
 import prisma from "../lib/prisma.js";
 import { deadLetterQueue } from "../lib/queue.js";
+import { Redis } from "ioredis";
+
+
+// Worker heartbeat connection
+const heartbeatRedis = new Redis({
+    host: process.env.REDIS_HOST || "localhost",
+    port: Number(process.env.REDIS_PORT || 6379),
+});
+
+heartbeatRedis.on("error", (error) => {
+    logger.error({ err: error }, "Worker heartbeat Redis error");
+});
+
+// Update heartbeat every 10 seconds
+const HEARTBEAT_INTERVAL = 10_000;
+const HEARTBEAT_TTL = 30;
+
+async function updateWorkerHeartbeat() {
+    try {
+        await heartbeatRedis.set(
+            "taskforge:health:worker",
+            new Date().toISOString(),
+            "EX",
+            HEARTBEAT_TTL
+        );
+    } catch (error) {
+        logger.error(
+            { err: error },
+            "Failed to update worker heartbeat"
+        );
+    }
+}
+
+// Send first heartbeat immediately
+void updateWorkerHeartbeat();
+
+// Continue sending heartbeat every 10 seconds
+const heartbeatTimer = setInterval(() => {
+    void updateWorkerHeartbeat();
+}, HEARTBEAT_INTERVAL);
+
 
 const worker = new Worker(
     "taskforge-jobs",
@@ -234,6 +275,13 @@ async function gracefulShutdown(signal: string) {
     try {
         await worker.close();
         logger.info("Worker closed successfully.");
+
+        clearInterval(heartbeatTimer);
+
+await heartbeatRedis.del("taskforge:health:worker");
+await heartbeatRedis.quit();
+
+logger.info("Worker heartbeat stopped successfully.");
 
         await prisma.$disconnect();
         logger.info("Prisma disconnected successfully.");

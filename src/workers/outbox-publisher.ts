@@ -3,8 +3,49 @@ import "dotenv/config";
 import logger from "../lib/logger.js";
 import prisma from "../lib/prisma.js";
 import { jobQueue } from "../lib/queue.js";
+import { Redis } from "ioredis";
 
 const POLL_INTERVAL = 5000;
+
+// Outbox publisher heartbeat
+const heartbeatRedis = new Redis({
+    host: process.env.REDIS_HOST || "localhost",
+    port: Number(process.env.REDIS_PORT || 6379),
+});
+
+heartbeatRedis.on("error", (error) => {
+    logger.error(
+        { err: error },
+        "Outbox heartbeat Redis error"
+    );
+});
+
+const HEARTBEAT_INTERVAL = 10_000;
+const HEARTBEAT_TTL = 30;
+
+async function updatePublisherHeartbeat() {
+    try {
+        await heartbeatRedis.set(
+            "taskforge:health:outbox-publisher",
+            new Date().toISOString(),
+            "EX",
+            HEARTBEAT_TTL
+        );
+    } catch (error) {
+        logger.error(
+            { err: error },
+            "Failed to update outbox publisher heartbeat"
+        );
+    }
+}
+
+// Send first heartbeat immediately
+void updatePublisherHeartbeat();
+
+// Refresh heartbeat every 10 seconds
+const heartbeatTimer = setInterval(() => {
+    void updatePublisherHeartbeat();
+}, HEARTBEAT_INTERVAL);
 
 let isRunning = true;
 
@@ -201,9 +242,25 @@ try {
     );
     process.exitCode = 1;
 } finally {
+    clearInterval(heartbeatTimer);
+
+    try {
+        await heartbeatRedis.del(
+            "taskforge:health:outbox-publisher"
+        );
+
+        logger.info("Outbox publisher heartbeat removed.");
+    } catch (error) {
+        logger.error(
+            { err: error },
+            "Failed to remove outbox publisher heartbeat"
+        );
+    }
+
     await Promise.all([
         jobQueue.close(),
         prisma.$disconnect(),
+        heartbeatRedis.quit(),
     ]);
 
     logger.info("Outbox publisher stopped.");
