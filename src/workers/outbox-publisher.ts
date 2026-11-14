@@ -1,41 +1,45 @@
+
 import "dotenv/config";
+import logger from "../lib/logger.js";
 import prisma from "../lib/prisma.js";
 import { jobQueue } from "../lib/queue.js";
 
 const POLL_INTERVAL = 5000;
 
 let isRunning = true;
-console.log("Outbox publisher file is executing...");
 
+logger.info("Outbox publisher file is executing...");
 
+// Recover stale outbox events
 async function recoverStaleEvents() {
-  const staleTime = new Date(Date.now() - 60 * 1000);
+    const staleTime = new Date(Date.now() - 60 * 1000);
 
-  const result = await prisma.outboxEvent.updateMany({
-    where: {
-      status: "PROCESSING",
-      claimedAt: {
-        lt: staleTime,
-      },
-    },
-    data: {
-      status: "PENDING",
-      claimedAt: null,
-      retryCount: {
-        increment: 1,
-      },
-      lastError: "Publisher timed out. Event moved back to PENDING.",
-    },
-  });
+    const result = await prisma.outboxEvent.updateMany({
+        where: {
+            status: "PROCESSING",
+            claimedAt: {
+                lt: staleTime,
+            },
+        },
+        data: {
+            status: "PENDING",
+            claimedAt: null,
+            retryCount: {
+                increment: 1,
+            },
+            lastError: "Publisher timed out. Event moved back to PENDING.",
+        },
+    });
 
-  if (result.count > 0) {
-    console.log(`Recovered ${result.count} stale outbox event(s).`);
-  }
+    if (result.count > 0) {
+        logger.warn(
+            { recoveredCount: result.count },
+            "Recovered stale outbox events"
+        );
+    }
 }
 
-
 // Publish pending outbox events to BullMQ
-
 async function publishPendingEvents() {
     const events = await prisma.outboxEvent.findMany({
         where: {
@@ -48,39 +52,51 @@ async function publishPendingEvents() {
     });
 
     for (const event of events) {
+        const payload = event.payload as {
+            jobId?: string;
+            correlationId?: string;
+        };
+
+        const jobId = payload.jobId;
+        const correlationId = payload.correlationId;
+
+        const logContext = {
+            eventId: event.id,
+            jobId,
+            correlationId,
+        };
+
         try {
-
+            // Claim event atomically
             const claim = await prisma.outboxEvent.updateMany({
-                where:{
-                    id:event.id,
-                    status:"PENDING",
+                where: {
+                    id: event.id,
+                    status: "PENDING",
                 },
-                data:{
-                    status:"PROCESSING",
-                    claimedAt:new Date(),
-                }
-            })
+                data: {
+                    status: "PROCESSING",
+                    claimedAt: new Date(),
+                },
+            });
 
-            if(claim.count === 0){
-                console.log(`event already claimed ${event.id}`);
+            if (claim.count === 0) {
+                logger.warn(
+                    logContext,
+                    "Outbox event already claimed"
+                );
                 continue;
-
             }
-            const payload = event.payload as {
-                jobId?: string;
-            };
-            const jobId = payload.jobId;
 
             if (!jobId) {
                 throw new Error("Outbox event does not contain jobId.");
             }
 
-            // Add the job to Redis / BullMQ
+            // Add job to Redis / BullMQ
             await jobQueue.add(
                 "process-job",
-                { jobId },
+                { jobId, correlationId },
                 {
-                    jobId: jobId,
+                    jobId,
                     attempts: 3,
                     backoff: {
                         type: "exponential",
@@ -97,18 +113,25 @@ async function publishPendingEvents() {
                 data: {
                     status: "PUBLISHED",
                     publishedAt: new Date(),
-                    claimedAt:null,
+                    claimedAt: null,
                     lastError: null,
                 },
             });
 
-            console.log(`Published event: ${event.id}`);
-            console.log(`Queued job: ${jobId}`);
+            logger.info(
+                logContext,
+                "Outbox event published successfully"
+            );
 
         } catch (error) {
-            console.error(
-                `Failed to publish event ${event.id}:`,
-                error
+            const errorMessage =
+                error instanceof Error
+                    ? error.message
+                    : "Unknown publishing error";
+
+            logger.error(
+                { ...logContext, err: error },
+                "Failed to publish outbox event"
             );
 
             // Keep event PENDING so it can be retried
@@ -117,34 +140,36 @@ async function publishPendingEvents() {
                     id: event.id,
                 },
                 data: {
-                    status:"PENDING",
-                    claimedAt:null,
+                    status: "PENDING",
+                    claimedAt: null,
                     retryCount: {
                         increment: 1,
                     },
-                    lastError:
-                        error instanceof Error
-                            ? error.message
-                            : "Unknown publishing error",
+                    lastError: errorMessage,
                 },
             }).catch((dbError) => {
-                console.error(
-                    "Failed to update outbox error:",
-                    dbError
+                logger.error(
+                    { ...logContext, err: dbError },
+                    "Failed to update outbox error"
                 );
             });
         }
     }
 }
 
+// Start publisher polling
 async function startOutboxPublisher() {
-    console.log("Outbox publisher started...");
+    logger.info("Outbox publisher started...");
 
     while (isRunning) {
         try {
+            await recoverStaleEvents();
             await publishPendingEvents();
         } catch (error) {
-            console.error("Outbox polling failed:", error);
+            logger.error(
+                { err: error },
+                "Outbox polling failed"
+            );
         }
 
         if (isRunning) {
@@ -157,7 +182,9 @@ async function startOutboxPublisher() {
 
 // Graceful shutdown
 async function shutdown(signal: string) {
-    console.log(`${signal} received. Shutting down outbox publisher...`);
+    logger.info(
+        `${signal} received. Shutting down outbox publisher...`
+    );
 
     isRunning = false;
 }
@@ -166,10 +193,12 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 
 try {
-    await recoverStaleEvents();
     await startOutboxPublisher();
 } catch (error) {
-    console.error("Outbox publisher stopped unexpectedly:", error);
+    logger.error(
+        { err: error },
+        "Outbox publisher stopped unexpectedly"
+    );
     process.exitCode = 1;
 } finally {
     await Promise.all([
@@ -177,5 +206,5 @@ try {
         prisma.$disconnect(),
     ]);
 
-    console.log("Outbox publisher stopped.");
+    logger.info("Outbox publisher stopped.");
 }

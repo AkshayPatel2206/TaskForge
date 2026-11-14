@@ -1,191 +1,248 @@
+
 import "dotenv/config";
+import logger from "../lib/logger.js";
 import { Worker } from "bullmq";
 import prisma from "../lib/prisma.js";
 import { deadLetterQueue } from "../lib/queue.js";
-const worker = new Worker("taskforge-jobs", async (bullJob) => {
-    const { jobId } = bullJob.data as { jobId: string };
 
-    console.log(`Processing job: ${jobId}`);
+const worker = new Worker(
+    "taskforge-jobs",
+    async (bullJob) => {
+        const { jobId, correlationId } = bullJob.data as {
+            jobId: string;
+            correlationId?: string;
+        };
 
-    const job = await prisma.job.findUnique({
-        where: { id: jobId },
-    });
+        const logContext = { jobId, correlationId };
 
-    if (!job) {
-        throw new Error(`Job ${jobId} not found in PostgreSQL`);
-    }
+        logger.info(logContext, "Worker started processing job");
 
-    if (job.status !== "PENDING") {
-        console.log(`Skipping job ${jobId} with status ${job.status}`);
-        return;
-    }
+        const job = await prisma.job.findUnique({
+            where: { id: jobId },
+        });
 
-    const updated = await prisma.job.updateMany({
-        where: {
-            id: jobId,
-            status: "PENDING",
-        },
-        data: {
-            status: "RUNNING"
+        if (!job) {
+            throw new Error(`Job ${jobId} not found in PostgreSQL`);
         }
-    })
 
-    if (updated.count === 0) {
-        console.log(`Job ${jobId} was already claimed or changed`);
-        return;
-    }
-
-    const prevAttemps = await prisma.jobAttempt.count({
-        where: { jobId },
-    })
-
-    const attemptNumber = prevAttemps + 1;
-
-    const attemp = await prisma.jobAttempt.create({
-        data: {
-            jobId,
-            attemptNumber,
-            status: "RUNNING",
-            startedAt: new Date(),
+        if (job.status !== "PENDING") {
+            logger.warn(
+                { ...logContext, status: job.status },
+                "Skipping job because it is not pending"
+            );
+            return;
         }
-    })
 
+        const updated = await prisma.job.updateMany({
+            where: {
+                id: jobId,
+                status: "PENDING",
+            },
+            data: {
+                status: "RUNNING",
+            },
+        });
 
-    try {
-        await new Promise((resolve) => setTimeout(resolve, 3000));
-        //throw new Error("Intentional retry test failure");
-        //throw new Error("Intentional DLQ test failure");
+        if (updated.count === 0) {
+            logger.warn(logContext, "Job was already claimed or changed");
+            return;
+        }
 
+        const prevAttempts = await prisma.jobAttempt.count({
+            where: { jobId },
+        });
 
-        await prisma.$transaction([
-            prisma.jobAttempt.update({
-                where: {
-                    id: attemp.id,
+        const attemptNumber = prevAttempts + 1;
+
+        const attempt = await prisma.jobAttempt.create({
+            data: {
+                jobId,
+                attemptNumber,
+                status: "RUNNING",
+                startedAt: new Date(),
+            },
+        });
+
+        logger.info(
+            { ...logContext, attemptNumber },
+            "Job attempt started"
+        );
+
+        try {
+            await new Promise((resolve) => setTimeout(resolve, 3000));
+
+            await prisma.$transaction([
+                prisma.jobAttempt.update({
+                    where: { id: attempt.id },
+                    data: {
+                        status: "SUCCEEDED",
+                        finishedAt: new Date(),
+                    },
+                }),
+
+                prisma.job.update({
+                    where: { id: jobId },
+                    data: {
+                        status: "COMPLETED",
+                        result: {
+                            message: "Job processed successfully",
+                        },
+                    },
+                }),
+            ]);
+
+            logger.info(
+                { ...logContext, attemptNumber },
+                "Job completed successfully"
+            );
+
+        } catch (error) {
+            const errorMessage =
+                error instanceof Error
+                    ? error.message
+                    : "Unknown processing error";
+
+            const maxAttempts = bullJob.opts.attempts ?? 1;
+            const isLastAttempt =
+                bullJob.attemptsMade + 1 >= maxAttempts;
+
+            await prisma.$transaction([
+                prisma.jobAttempt.update({
+                    where: { id: attempt.id },
+                    data: {
+                        status: "FAILED",
+                        errorMessage,
+                        finishedAt: new Date(),
+                    },
+                }),
+
+                prisma.job.update({
+                    where: { id: jobId },
+                    data: {
+                        status: isLastAttempt ? "FAILED" : "PENDING",
+                    },
+                }),
+            ]);
+
+            logger.error(
+                {
+                    ...logContext,
+                    err: error,
+                    attemptNumber: bullJob.attemptsMade + 1,
+                    maxAttempts,
                 },
-                data: {
-                    status: "SUCCEEDED",
-                    finishedAt: new Date(),
-                },
-            }),
+                "Job processing attempt failed"
+            );
 
-            prisma.job.update({
-                where: { id: jobId },
-                data: {
-                    status: "COMPLETED",
-                    result: { message: "Job processed successfully" },
-                },
-            }),
-        ]);
-        console.log(`Job ${jobId} completed successfully`);
+            if (isLastAttempt) {
+                try {
+                    await deadLetterQueue.add(
+                        "dead-letter-job",
+                        {
+                            jobId,
+                            correlationId,
+                            errorMessage,
+                            failedAt: new Date().toISOString(),
+                            attemptsMade: bullJob.attemptsMade + 1,
+                        },
+                        {
+                            jobId: `${jobId}-dead-letter`,
+                        }
+                    );
 
+                    await prisma.job.update({
+                        where: { id: jobId },
+                        data: {
+                            deadLetteredAt: new Date(),
+                            deadLetterError: null,
+                        },
+                    });
 
-    } catch (error) {
+                    logger.warn(
+                        { ...logContext, errorMessage },
+                        "Job moved to dead-letter queue"
+                    );
 
-        const errorMessage =
-            error instanceof Error ? error.message : "Unknown processing error";
+                } catch (dlqError) {
+                    const dlqErrorMessage =
+                        dlqError instanceof Error
+                            ? dlqError.message
+                            : "Unknown DLQ delivery error";
 
+                    await prisma.job.update({
+                        where: { id: jobId },
+                        data: {
+                            deadLetterError: dlqErrorMessage,
+                        },
+                    });
 
-        const maxAttempts = bullJob.opts.attempts ?? 1;
-        const isLastAttempt = bullJob.attemptsMade + 1 >= maxAttempts;
-
-        await prisma.$transaction([
-            prisma.jobAttempt.update({
-                where: {
-                    id: attemp.id,
-                },
-                data: {
-                    status: "FAILED",
-                    errorMessage,
-                    finishedAt: new Date(),
+                    logger.error(
+                        { ...logContext, err: dlqError },
+                        "Failed to enqueue job in dead-letter queue"
+                    );
                 }
-            }),
-            prisma.job.update({
-                where: { id: jobId },
-                data: {
-                    status: isLastAttempt ? "FAILED" : "PENDING"
-                },
-            })
-        ]);
-
-        console.log(`Job ${jobId} failed on attempt ${bullJob.attemptsMade + 1} / ${maxAttempts}`);
-
-        if (isLastAttempt) {
-            try {
-                await deadLetterQueue.add("dead-letter-job", {
-                    jobId,
-                    errorMessage,
-                    failedAt: new Date().toISOString(),
-                    attemptsMade: bullJob.attemptsMade + 1,
-                }, {
-                    jobId: `${jobId}-dead-letter`,
-                });
-
-                await prisma.job.update({
-                    where: { id: jobId },
-                    data: {
-                        deadLetteredAt: new Date(),
-                        deadLetterError: null,
-                    },
-                });
-                console.log(`Job ${jobId} moved to dead-letter queue`);
-            } catch (error) {
-                const dlqErrorMessage =
-                    error instanceof Error
-                        ? error.message
-                        : "Unknown DLQ delivery error";
-
-                await prisma.job.update({
-                    where: { id: jobId },
-                    data: {
-                        deadLetterError: dlqErrorMessage,
-                    },
-                });
-
-                console.error(
-                    `Failed to enqueue job ${jobId} in dead-letter queue:`,
-                    dlqErrorMessage,
-                );
             }
+
+            throw error;
         }
-
-
-        throw error;
-    }
-},
+    },
     {
-  connection: {
-    host: process.env.REDIS_HOST || "localhost",
-    port: Number(process.env.REDIS_PORT || 6379),
-  },
-  concurrency: 5,
-});
+        connection: {
+            host: process.env.REDIS_HOST || "localhost",
+            port: Number(process.env.REDIS_PORT || 6379),
+        },
+        concurrency: 5,
+    }
+);
+
+// BullMQ events
 
 worker.on("completed", (job) => {
-    console.log(`Queue job ${job.id} compleated`);
+    logger.info(
+        {
+            jobId: job.data.jobId,
+            correlationId: job.data.correlationId,
+            queueJobId: job.id,
+        },
+        "Queue job completed"
+    );
 });
 
 worker.on("failed", (job, error) => {
-    console.error(`Queue job ${job?.id} failed:`, error.message);
+    logger.error(
+        {
+            jobId: job?.data.jobId,
+            correlationId: job?.data.correlationId,
+            queueJobId: job?.id,
+            err: error,
+        },
+        "Queue job failed"
+    );
 });
 
-console.log("TaskForge worker is running");
+worker.on("error", (error) => {
+    logger.error({ err: error }, "Worker encountered an error");
+});
 
+logger.info("TaskForge worker is running");
+
+// Graceful shutdown
 
 async function gracefulShutdown(signal: string) {
-  console.log(`\n${signal} received. Shutting down worker...`);
+    logger.info(`${signal} received. Shutting down worker...`);
 
-  try {
-    await worker.close();
-    console.log("Worker closed successfully.");
+    try {
+        await worker.close();
+        logger.info("Worker closed successfully.");
 
-    await prisma.$disconnect();
-    console.log("Prisma disconnected successfully.");
+        await prisma.$disconnect();
+        logger.info("Prisma disconnected successfully.");
 
-    process.exit(0);
-  } catch (error) {
-    console.error("Error during graceful shutdown:", error);
-    process.exit(1);
-  }
+        process.exit(0);
+    } catch (error) {
+        logger.error({ err: error }, "Error during graceful shutdown");
+        process.exit(1);
+    }
 }
 
 process.on("SIGINT", () => gracefulShutdown("SIGINT"));

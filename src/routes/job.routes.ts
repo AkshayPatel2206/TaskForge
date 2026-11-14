@@ -190,6 +190,7 @@ router.post("/", async (req, res) => {
           eventType: "JOB_CREATED",
           payload: {
             jobId: job.id,
+             correlationId: res.locals.requestId,
           },
         },
       });
