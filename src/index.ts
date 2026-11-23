@@ -11,10 +11,11 @@ import helmet from "helmet";
 dotenv.config();
 
 const app = express();
+app.set("query parser", "simple");
 const PORT = process.env.PORT || 4001;
 app.use(helmet());
 
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 
 app.use((req,res,next) => {
     const requestId = randomUUID();

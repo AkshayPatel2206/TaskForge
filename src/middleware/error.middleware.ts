@@ -14,6 +14,20 @@ const errorMiddleware = (
   let message = "Internal Server Error";
   let errors: { field: string; message: string }[] | undefined;
 
+  if ("type" in err && err.type === "entity.too.large") {
+    statusCode = 413;
+    message = "Request body is too large";
+}
+if (
+    err instanceof SyntaxError &&
+    "status" in err &&
+    err.status === 400 &&
+    "body" in err
+) {
+    statusCode = 400;
+    message = "Invalid JSON request body";
+}
+
   if (err instanceof AppError) {
     statusCode = err.statusCode;
     message = err.message;
