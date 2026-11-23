@@ -6,7 +6,7 @@ import jobRoutes from "./routes/job.routes.js";
 import logger from "./lib/logger.js";
 import healthRoutes from "./routes/health.routes.js";
 import errorMiddleware from "./middleware/error.middleware.js";
-
+import { apiLimiter, authLimiter } from "./middleware/rate-limit.middleware.js";
 dotenv.config();
 
 const app = express();
@@ -43,7 +43,8 @@ app.use((req, res, next) => {
 
     next();
 });
-app.use("/api/auth", authRoutes);
+app.use("/api", apiLimiter);
+app.use("/api/auth", authLimiter, authRoutes);
 app.use("/api/jobs", jobRoutes);
 app.use("/health", healthRoutes);
 
