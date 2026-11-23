@@ -2,7 +2,6 @@ import { Router } from "express";
 
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
-import { z } from "zod";
 import prisma from "../lib/prisma.js";
 import { loginSchema, registerSchema } from "../schemas/auth.schema.js";
 
@@ -17,21 +16,12 @@ function generateToken(userId: string) {
 
     return secretKey;
 }
-router.post("/register", async (req, res) => {
+router.post("/register", async (req, res, next) => {
 
     const validation = registerSchema.safeParse(req.body);
 
     if (!validation.success) {
-        res.status(400).json({
-            success: false,
-            message: "Invalid Registration Data",
-            errors: validation.error.issues.map((issue) => ({
-                field: issue.path.join("."),
-                message: issue.message,
-            }))
-
-        })
-        return;
+        return next(validation.error);
     }
 
     try {
@@ -79,22 +69,10 @@ router.post("/register", async (req, res) => {
     }
 });
 
-router.post("/login", async (req, res) => {
+router.post("/login", async (req, res, next) => {
     const validation = loginSchema.safeParse(req.body);
     if (!validation.success) {
-        res.status(400).json({
-            success: false,
-
-            message: "Invalid Login Data",
-
-            errors: validation.error.issues.map((issue) => ({
-                field: issue.path.join("."),
-                message: issue.message,
-
-            })),
-
-        });
-        return;
+        return next(validation.error);
     }
 
     try {

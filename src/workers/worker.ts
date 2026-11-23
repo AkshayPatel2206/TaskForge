@@ -278,10 +278,10 @@ async function gracefulShutdown(signal: string) {
 
         clearInterval(heartbeatTimer);
 
-await heartbeatRedis.del("taskforge:health:worker");
-await heartbeatRedis.quit();
+        await heartbeatRedis.del("taskforge:health:worker");
+        await heartbeatRedis.quit();
 
-logger.info("Worker heartbeat stopped successfully.");
+        logger.info("Worker heartbeat stopped successfully.");
 
         await prisma.$disconnect();
         logger.info("Prisma disconnected successfully.");

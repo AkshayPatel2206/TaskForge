@@ -3,13 +3,12 @@ import { Router } from "express";
 import prisma from "../lib/prisma.js";
 import { isAuthenticated } from "../middleware/auth.middleware.js";
 import { createJobSchema } from "../schemas/job.schema.js";
-import { tryCatch } from "bullmq";
-
+import AppError from "../lib/app-error.js";
 const router = Router();
 
 router.use(isAuthenticated);
 
-router.get("/metrics", async (req, res) => {
+router.get("/metrics", async (req, res,next) => {
   try {
     const userId = req.user!.id;
 
@@ -92,15 +91,10 @@ router.get("/metrics", async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("Failed to fetch job metrics:", error);
-
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch job metrics",
-    });
+    return next(error);
   }
 });
-router.get("/", async (req, res) => {
+router.get("/", async (req, res,next) => {
   try {
 
     const page = Number(req.query.page ?? 1);
@@ -167,16 +161,11 @@ router.get("/", async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("Failed to fetch jobs:", error);
-
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch jobs",
-    });
+    return next(error);
   }
 });
 
-router.get("/failed", async (req, res) => {
+router.get("/failed", async (req, res,next) => {
   try {
     const jobs = await prisma.job.findMany({
       where: {
@@ -200,15 +189,10 @@ router.get("/failed", async (req, res) => {
       data: jobs,
     });
   } catch (error) {
-    console.error("Failed to fetch failed jobs:", error);
-
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch failed jobs",
-    });
+    return next(error);
   }
 });
-router.get("/:id", async (req, res) => {
+router.get("/:id", async (req, res,next) => {
   try {
     const job = await prisma.job.findFirst({
       where: {
@@ -237,25 +221,15 @@ router.get("/:id", async (req, res) => {
       data: job,
     });
   } catch (error) {
-    console.error("Failed to fetch job:", error);
-
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch job",
-    });
+    return next(error);
   }
 });
 
-
-router.post("/", async (req, res) => {
+router.post("/", async (req, res, next) => {
   const validation = createJobSchema.safeParse(req.body);
 
   if (!validation.success) {
-    res.status(400).json({
-      success: false,
-      errors: validation.error.issues,
-    });
-    return;
+    return next(validation.error);
   }
 
   try {
@@ -297,18 +271,11 @@ router.post("/", async (req, res) => {
     });
 
   } catch (error) {
-    console.error("Failed to create job:", error);
-
-    res.status(500).json({
-      success: false,
-      message: "Failed to create job",
-    });
+    return next(error);
   }
 });
 
-
-
-router.delete("/:id", async (req, res) => {
+router.delete("/:id", async (req, res,next) => {
   try {
     const job = await prisma.job.findFirst({
       where: {
@@ -356,17 +323,10 @@ router.delete("/:id", async (req, res) => {
 
 
   } catch (error) {
-    console.error("Failed to delete job:", error);
-
-    res.status(500).json({
-      success: false,
-      message: "Failed to delete job",
-    });
+    return next(error);
   }
 })
-
-
-router.post("/:id/cancel", async (req, res) => {
+router.post("/:id/cancel", async (req, res,next) => {
   try {
     const job = await prisma.job.findFirst({
       where: {
@@ -415,16 +375,12 @@ router.post("/:id/cancel", async (req, res) => {
       message: "Job cancelled successfully",
     });
   } catch (error) {
-    console.error("Failed to cancel job:", error);
-    res.status(500).json({
-      success: false,
-      message: "Failed to cancel job",
-    });
+    return next(error);
   }
 });
 
 
-router.post("/:id/retry", async (req, res) => {
+router.post("/:id/retry", async (req, res,next) => {
   try {
     const job = await prisma.job.findFirst({
       where: {
@@ -498,11 +454,9 @@ router.post("/:id/retry", async (req, res) => {
         },
       });
 
-      res.status(503).json({
-        success: false,
-        message: "Unable to queue retry. Please try again.",
-      });
-      return;
+       return next(
+    new AppError("Unable to queue retry. Please try again.", 503)
+  );
     }
 
     res.status(202).json({
@@ -514,12 +468,7 @@ router.post("/:id/retry", async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("Failed to retry job:", error);
-
-    res.status(500).json({
-      success: false,
-      message: "Failed to retry job",
-    });
+   return next(error);
   }
 });
 

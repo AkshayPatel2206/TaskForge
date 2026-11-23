@@ -5,6 +5,8 @@ import authRoutes from "./routes/auth.routes.js";
 import jobRoutes from "./routes/job.routes.js";
 import logger from "./lib/logger.js";
 import healthRoutes from "./routes/health.routes.js";
+import errorMiddleware from "./middleware/error.middleware.js";
+
 dotenv.config();
 
 const app = express();
@@ -45,6 +47,7 @@ app.use("/api/auth", authRoutes);
 app.use("/api/jobs", jobRoutes);
 app.use("/health", healthRoutes);
 
+app.use(errorMiddleware);
 
 app.listen(PORT, () => {
     logger.info(
