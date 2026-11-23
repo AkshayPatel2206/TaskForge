@@ -7,10 +7,12 @@ import logger from "./lib/logger.js";
 import healthRoutes from "./routes/health.routes.js";
 import errorMiddleware from "./middleware/error.middleware.js";
 import { apiLimiter, authLimiter } from "./middleware/rate-limit.middleware.js";
+import helmet from "helmet";
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 4001;
+app.use(helmet());
 
 app.use(express.json());
 
